@@ -1,0 +1,25 @@
+[project]
+name = "biobank-beam"
+version = "0.0.1"
+description = "An example app for the Samply.Beam workshop"
+authors = [
+  { name = "Tobias Kussel", email = "tobias.kussel@dkfz-heidelberg.de" },
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "textual>=0.60.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.0",
+  "python-dotenv",
+]
+
+[tool.black]
+line-length = 88
+
+[tool.ruff]
+select = ["E", "F", "I"]
+line-length = 88
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
