@@ -18,7 +18,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from beam import BeamTask
+from beam import BeamTask, FailureStrategy, Retry
+from beam import BeamClient, BeamTask
 from textual.widgets import (
     Button,
     Footer,
@@ -40,7 +41,9 @@ load_dotenv()
 BEAM_PROXY_URL = os.getenv("BEAM_PROXY_URL", "http://localhost:8081")
 BEAM_APIKEY = os.getenv("BEAM_APIKEY")
 PROXY_ID = os.getenv("PROXY_ID")
+APP_ID = f"bb-beam.{PROXY_ID}"
 RESULTS_ENDPOINT = os.getenv("RESULTS_ENDPOINT", "https://httpbin.org/json")
+BEAM_CLIENT = BeamClient(APP_ID, BEAM_APIKEY, BEAM_PROXY_URL)
 
 __log_file = open("bb-beam.log", "a+")
 def debug(*args, **kwargs):
@@ -96,9 +99,14 @@ class TasksTab(TabPane):
         self.query_one("#tasks_preview", Pretty).update(task)
 
     @on(Button.Pressed, "#task_submit")
-    def _on_task_submit(self) -> None:
+    async def _on_task_submit(self) -> None:
         task = self._collect_form()
-        self.app.tasks[task.id] = task
+        try:
+            await BEAM_CLIENT.post_beam_task(task)
+        except Exception as e:
+            self.query_one("#tasks_preview", Pretty).update(f"Error: {e}")
+        else:
+            self.app.tasks[task.id] = task
         tasks_list = self.query_one("#tasks_list", ListView)
         tasks_list.append(ListItem(TaskLabel(task.id, f"Sent: {task.id}")))
 
@@ -112,7 +120,7 @@ class TasksTab(TabPane):
         body_val = body.text.strip()
         body.text = ""
         return BeamTask(
-            from_=f"bb-beam.{PROXY_ID}",
+            from_=APP_ID,
             to=to_value,
             metadata=self._parse_json_or_text(self.query_one("#task_metadata", Input).value) or None,
             ttl=self.query_one("#task_ttl", Input).value.strip() or "30s",
