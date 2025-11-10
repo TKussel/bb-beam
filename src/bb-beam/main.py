@@ -33,6 +33,11 @@ from textual.widgets import (
     Pretty
 )
 
+__log_file = open("bb-beam.log", "a+")
+def debug(*args, **kwargs):
+    print(*args, **kwargs, file=__log_file)
+    __log_file.flush()
+
 class UpdateTasks(Message):
     def __init__(self, items: dict):
         self.items = items
@@ -274,4 +279,3 @@ class TasksResultsApp(App):
 if __name__ == "__main__":
     app = TasksResultsApp()
     app.run()
-
