@@ -17,9 +17,8 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.message import Message
 from textual.reactive import reactive
-from beam import BeamTask, FailureStrategy, Retry
+from beam import BeamTask
 from textual.widgets import (
     Button,
     Footer,
@@ -48,11 +47,6 @@ def debug(*args, **kwargs):
     print(*args, **kwargs, file=__log_file)
     __log_file.flush()
 
-class UpdateTasks(Message):
-    def __init__(self, items: dict):
-        self.items = items
-        super().__init__()
-
 class SectionTitle(Static):
     def __init__(self, text: str) -> None:
         super().__init__(text)
@@ -68,19 +62,6 @@ class TaskLabel(Label):
 
 class TasksTab(TabPane):
     BINDINGS = [Binding("ctrl+enter", "submit_task", "Submit Task")]
-
-    class Submitted(Message):
-        def __init__(self, task: BeamTask) -> None:
-            self.task = task
-            super().__init__()
-
-    @on(UpdateTasks)
-    def update_task_list(self, message: UpdateTasks):
-        list_view = self.query_one("#tasks_list", ListView)
-        list_view.clear()
-        self.notify("Updating task")
-        for k, v in message.items.items():
-            list_view.append(ListItem(TaskLabel(v.get("id") ,f"{k}")))
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
@@ -117,12 +98,9 @@ class TasksTab(TabPane):
     @on(Button.Pressed, "#task_submit")
     def _on_task_submit(self) -> None:
         task = self._collect_form()
-        self.post_message(self.Submitted(task))
+        self.app.tasks[task.id] = task
         tasks_list = self.query_one("#tasks_list", ListView)
         tasks_list.append(ListItem(TaskLabel(task.id, f"Sent: {task.id}")))
-
-    def action_submit_task(self) -> None:
-        self._on_task_submit()
 
     def _collect_form(self) -> BeamTask:
         to = self.query_one("#task_to", Input).value.strip()
@@ -153,11 +131,6 @@ class ResultsTab(TabPane):
     BINDINGS = [Binding("r", "refresh", "Refresh Results"), Binding("ctrl+enter", "submit_result", "Submit Result")]
 
     results: reactive[List[dict[str, Any]]] = reactive([], layout=True)
-
-    class Submitted(Message):
-        def __init__(self, payload: dict[str, Any]) -> None:
-            self.payload = payload
-            super().__init__()
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
@@ -216,7 +189,6 @@ class ResultsTab(TabPane):
     @on(Button.Pressed, "#res_submit")
     def _on_res_submit(self) -> None:
         payload = self._collect_form()
-        self.post_message(self.Submitted(payload))
         lv = self.query_one("#results_list", ListView)
         lv.append(ListItem(Label(json.dumps(payload)[:120])))
 
@@ -274,18 +246,6 @@ class TasksResultsApp(App):
 
     def __init__(self):
         super().__init__()
-
-    @on(TasksTab.Submitted)
-    def _on_task_submitted(self, message: TasksTab.Submitted) -> None:
-        self.bell()
-        self.tasks[message.task.id] = message.task
-        self.post_message(UpdateTasks(self.tasks))
-        self.notify(f"Task created: {message.task.to}")
-
-    @on(ResultsTab.Submitted)
-    def _on_result_submitted(self, message: ResultsTab.Submitted) -> None:
-        self.bell()
-        self.notify(f"Result submitted: {message.payload.get('status','success')}")
 
 if __name__ == "__main__":
     app = TasksResultsApp()
