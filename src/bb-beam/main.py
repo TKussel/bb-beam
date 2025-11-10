@@ -11,6 +11,7 @@ from typing import Any, List
 
 import uuid
 import httpx
+from dotenv import load_dotenv
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -33,6 +34,13 @@ from textual.widgets import (
     Pretty
 )
 
+load_dotenv()
+
+BEAM_PROXY_URL = os.getenv("BEAM_PROXY_URL", "http://localhost:8081")
+BEAM_APIKEY = os.getenv("BEAM_APIKEY")
+PROXY_ID = os.getenv("PROXY_ID")
+RESULTS_ENDPOINT = os.getenv("RESULTS_ENDPOINT", "https://httpbin.org/json")
+
 __log_file = open("bb-beam.log", "a+")
 def debug(*args, **kwargs):
     print(*args, **kwargs, file=__log_file)
@@ -42,12 +50,6 @@ class UpdateTasks(Message):
     def __init__(self, items: dict):
         self.items = items
         super().__init__()
-
-RESULTS_ENDPOINT = os.getenv("RESULTS_ENDPOINT", "https://httpbin.org/json")
-TASKS_LIST_PLACEHOLDER = [
-    "Sent: Task 1",
-    "New Task",
-]
 
 class SectionTitle(Static):
     def __init__(self, text: str) -> None:
