@@ -107,15 +107,16 @@ class TasksTab(TabPane):
     @on(ListView.Highlighted, "#tasks_list")
     def _on_task_list_highlight(self, event: ListView.Highlighted) -> None:
         label = event.item.query_one(TaskLabel)
-        self.notify(f"{label}")
-        self.query_one("#tasks_preview", Pretty).update(self.app.tasks.get(label.content))
+        task = self.app.tasks.get(label.task_id, "Gone")
+        self.query_one("#tasks_preview", Pretty).update(task)
 
     @on(Button.Pressed, "#task_submit")
     def _on_task_submit(self) -> None:
         payload = self._collect_form()
         self.post_message(self.Submitted(payload))
         tasks_list = self.query_one("#tasks_list", ListView)
-        tasks_list.append(ListItem(Label(f"Sent: {payload.get('id','?')}")))
+        id = payload.get('id', '?')
+        tasks_list.append(ListItem(TaskLabel(id, f"Sent: {id}")))
 
     def action_submit_task(self) -> None:
         self._on_task_submit()
