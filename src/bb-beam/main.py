@@ -12,12 +12,14 @@ from typing import Any, List
 import uuid
 import httpx
 from dotenv import load_dotenv
+from pydantic.types import UUID4
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
+from beam import BeamTask, FailureStrategy, Retry
 from textual.widgets import (
     Button,
     Footer,
@@ -59,7 +61,7 @@ class NonFocusableVertical(Vertical):
     can_focus=False
 
 class TaskLabel(Label):
-    def __init__(self, task_id, *args, **kwargs):
+    def __init__(self, task_id: UUID4, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.task_id = task_id
 
@@ -68,8 +70,8 @@ class TasksTab(TabPane):
     BINDINGS = [Binding("ctrl+enter", "submit_task", "Submit Task")]
 
     class Submitted(Message):
-        def __init__(self, payload: dict[str, Any]) -> None:
-            self.payload = payload
+        def __init__(self, task: BeamTask) -> None:
+            self.task = task
             super().__init__()
 
     @on(UpdateTasks)
@@ -84,7 +86,7 @@ class TasksTab(TabPane):
         yield Horizontal(
             Vertical(
                 SectionTitle("Sent Tasks"),
-                ListView(*[ListItem(TaskLabel(v.get("id"), k)) for (k, v) in self.app.tasks.items()], id="tasks_list"),
+                ListView(*[ListItem(TaskLabel(v.id, k)) for (k, v) in self.app.tasks.items()], id="tasks_list"),
                 id="tasks_upper_left",
             ),
             NonFocusableVertical(
@@ -109,28 +111,36 @@ class TasksTab(TabPane):
     @on(ListView.Highlighted, "#tasks_list")
     def _on_task_list_highlight(self, event: ListView.Highlighted) -> None:
         label = event.item.query_one(TaskLabel)
-        task = self.app.tasks.get(label.task_id, "Gone")
+        task: BeamTask = self.app.tasks.get(label.task_id, "Gone")
         self.query_one("#tasks_preview", Pretty).update(task)
 
     @on(Button.Pressed, "#task_submit")
     def _on_task_submit(self) -> None:
-        payload = self._collect_form()
-        self.post_message(self.Submitted(payload))
+        task = self._collect_form()
+        self.post_message(self.Submitted(task))
         tasks_list = self.query_one("#tasks_list", ListView)
-        id = payload.get('id', '?')
-        tasks_list.append(ListItem(TaskLabel(id, f"Sent: {id}")))
+        tasks_list.append(ListItem(TaskLabel(task.id, f"Sent: {task.id}")))
 
     def action_submit_task(self) -> None:
         self._on_task_submit()
 
-    def _collect_form(self) -> dict[str, Any]:
-        return {
-            "id": uuid.uuid4(),
-            "to": [x.strip() for x in self.query_one("#task_to", Input).value.split(',')],
-            "metadata": self._parse_json_or_text(self.query_one("#task_metadata", Input).value),
-            "ttl": self.query_one("#task_ttl", Input).value.strip(),
-            "body": self.query_one("#task_body", TextArea).text.strip(),
-        }
+    def _collect_form(self) -> BeamTask:
+        to = self.query_one("#task_to", Input).value.strip()
+        if to:
+            to_value = list(map(str.strip, to.split(',')))
+        else:
+            to_value = []
+        body = self.query_one("#task_body", TextArea)
+        body_val = body.text.strip()
+        body.text = ""
+        return BeamTask(
+            from_=f"bb-beam.{PROXY_ID}",
+            to=to_value,
+            metadata=self._parse_json_or_text(self.query_one("#task_metadata", Input).value) or None,
+            ttl=self.query_one("#task_ttl", Input).value.strip() or "30s",
+            body=body_val,
+            failure_strategy="discard"
+        )
 
     @staticmethod
     def _parse_json_or_text(value: str) -> Any:
@@ -251,7 +261,7 @@ class TasksResultsApp(App):
     """
 
     TITLE = "Tasks & Results"
-    tasks = reactive({})
+    tasks: reactive[dict[UUID4, BeamTask]] = reactive({})
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -264,15 +274,13 @@ class TasksResultsApp(App):
 
     def __init__(self):
         super().__init__()
-        self.tasks = {"Empty": json.loads('{"id": "0000-0000", "text": "Nothing to display"}')}
-        self.notify(f"")
 
     @on(TasksTab.Submitted)
     def _on_task_submitted(self, message: TasksTab.Submitted) -> None:
         self.bell()
-        self.tasks[message.payload.get('id')] = message.payload
+        self.tasks[message.task.id] = message.task
         self.post_message(UpdateTasks(self.tasks))
-        self.notify(f"Task created: {message.payload.get('to','(no to)')}")
+        self.notify(f"Task created: {message.task.to}")
 
     @on(ResultsTab.Submitted)
     def _on_result_submitted(self, message: ResultsTab.Submitted) -> None:
