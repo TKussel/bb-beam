@@ -17,7 +17,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
-from beam import BeamClient, BeamTask
+from textual.widgets.data_table import RowKey
+from beam import BeamClient, BeamTask, BeamWorkStatus
 from textual.widgets import (
     Button,
     DataTable,
@@ -48,6 +49,12 @@ __log_file = open("bb-beam.log", "a+")
 def debug(*args, **kwargs):
     print(*args, **kwargs, file=__log_file)
     __log_file.flush()
+
+def parse_json_or_text(value: str) -> Any:
+    try:
+        return json.loads(value) if value else {}
+    except Exception:
+        return value
 
 class SectionTitle(Static):
     def __init__(self, text: str) -> None:
@@ -121,43 +128,48 @@ class TasksTab(TabPane):
         return BeamTask(
             from_=APP_ID,
             to=to_value,
-            metadata=self._parse_json_or_text(self.query_one("#task_metadata", Input).value) or None,
+            metadata=parse_json_or_text(self.query_one("#task_metadata", Input).value) or None,
             ttl=self.query_one("#task_ttl", Input).value.strip() or "30s",
             body=body_val,
             failure_strategy="discard"
         )
 
-    @staticmethod
-    def _parse_json_or_text(value: str) -> Any:
-        try:
-            return json.loads(value) if value else {}
-        except Exception:
-            return value
 
 class IncomingTasksTab(TabPane):
     BINDINGS = [Binding("r", "refresh", "Refresh Results"), Binding("ctrl+enter", "submit_result", "Submit Result")]
 
     class TaskList(Static):
-        current_tasks: dict[UUID4, BeamTask] = {}
+        all_tasks: dict[UUID4, BeamTask] = {}
 
         async def on_mount(self) -> None:
-            self.table = DataTable()
+            self.table = DataTable(cursor_type="row")
             self.mount(self.table)
-            self.table.add_columns("ID", "From", "Body")
-            self.task_rows = {}  # Map task ID to row key
+            [_id, _from, _body, result_col] = self.table.add_columns("ID", "From", "Body", "Result")
+            self.result_col = result_col
+            self.task_rows: dict[UUID4, RowKey] = {}
             asyncio.create_task(self.watch_tasks())
+
+        def get_selected_task(self) -> BeamTask | None:
+            row_key = self.table.coordinate_to_cell_key(self.table.cursor_coordinate).row_key
+            for task_id, stored_row_key in self.task_rows.items():
+                if stored_row_key == row_key:
+                    return self.all_tasks[task_id]
+
+        def update_task_result(self, task_id: UUID4, result: str):
+            row_key = self.task_rows[task_id]
+            self.table.update_cell(row_key, self.result_col, result)
 
         def update_tasks(self, new_tasks: List[BeamTask]):
             for task in new_tasks:
                 if task.id not in self.task_rows:
-                    row_key = self.table.add_row(task.id, task.from_, task.body)
+                    row_key = self.table.add_row(task.id, task.from_, task.body, "Awaiting response")
                     self.task_rows[task.id] = row_key
 
         async def watch_tasks(self) -> None:
             while True:
                 try:
                     new_tasks = await BEAM_CLIENT.get_beam_tasks()
-                    self.current_tasks = {task.id: task for task in new_tasks}
+                    self.all_tasks = {**self.all_tasks, **{task.id: task for task in new_tasks}}
                     self.update_tasks(new_tasks)
                 except Exception as e:
                     debug(f"Error fetching tasks: {e}")
@@ -178,7 +190,7 @@ class IncomingTasksTab(TabPane):
                     Label("status"),
                     Select(
                         (
-                            ("success", "success"),
+                            ("success", "succeeded"),
                             ("claimed", "claimed"),
                             ("tempfailed", "tempfailed"),
                             ("permfailed", "permfailed"),
@@ -195,24 +207,22 @@ class IncomingTasksTab(TabPane):
 
 
     @on(Button.Pressed, "#res_submit")
-    def _on_res_submit(self) -> None:
-        payload = self._collect_form()
-        lv = self.query_one("#incoming_tasks_list", ListView)
-        lv.append(ListItem(Label(json.dumps(payload)[:120])))
-
-    def action_submit_result(self) -> None:
-        self._on_res_submit()
-
-    def _collect_form(self) -> dict[str, Any]:
-        meta_raw = self.query_one("#res_metadata", Input).value
-        try:
-            metadata = json.loads(meta_raw) if meta_raw else {}
-        except Exception:
-            metadata = meta_raw
-        status = self.query_one("#res_status", Select).value or "success"
+    async def answer_task(self) -> None:
+        task_list = self.query_one(self.TaskList)
+        task = task_list.get_selected_task()
+        if task is None:
+            self.notify("Please select a task")
+            return
         body = self.query_one("#res_body", TextArea).text.strip()
-        return {"metadata": metadata, "status": status, "body": body}
-
+        status = self.query_one("#res_status", Select).value
+        if status == Select.BLANK:
+            status = "succeeded"
+        metadata = parse_json_or_text(self.query_one("#res_metadata", Input).value)
+        try:
+            await BEAM_CLIENT.answer_task(task, body, status, metadata)  # pyright: ignore[reportArgumentType]
+        except Exception as e:
+            self.notify(f"Failed to submit result: {e}")
+        task_list.update_task_result(task.id, str(status))
 
 class TasksResultsApp(App):
     CSS = """
