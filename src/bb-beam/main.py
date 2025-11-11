@@ -9,8 +9,6 @@ import json
 import os
 from typing import Any, List
 
-import uuid
-import httpx
 from dotenv import load_dotenv
 from pydantic.types import UUID4
 from textual import on
@@ -18,10 +16,11 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from beam import BeamTask, FailureStrategy, Retry
+from textual.widget import Widget
 from beam import BeamClient, BeamTask
 from textual.widgets import (
     Button,
+    DataTable,
     Footer,
     Header,
     Input,
@@ -115,7 +114,7 @@ class TasksTab(TabPane):
         if to:
             to_value = list(map(str.strip, to.split(',')))
         else:
-            to_value = []
+            to_value = [APP_ID]
         body = self.query_one("#task_body", TextArea)
         body_val = body.text.strip()
         body.text = ""
@@ -135,17 +134,40 @@ class TasksTab(TabPane):
         except Exception:
             return value
 
-class ResultsTab(TabPane):
+class IncomingTasksTab(TabPane):
     BINDINGS = [Binding("r", "refresh", "Refresh Results"), Binding("ctrl+enter", "submit_result", "Submit Result")]
 
-    results: reactive[List[dict[str, Any]]] = reactive([], layout=True)
+    class TaskList(Static):
+        current_tasks: dict[UUID4, BeamTask] = {}
+
+        async def on_mount(self) -> None:
+            self.table = DataTable()
+            self.mount(self.table)
+            self.table.add_columns("ID", "From", "Body")
+            self.task_rows = {}  # Map task ID to row key
+            asyncio.create_task(self.watch_tasks())
+
+        def update_tasks(self, new_tasks: List[BeamTask]):
+            for task in new_tasks:
+                if task.id not in self.task_rows:
+                    row_key = self.table.add_row(task.id, task.from_, task.body)
+                    self.task_rows[task.id] = row_key
+
+        async def watch_tasks(self) -> None:
+            while True:
+                try:
+                    new_tasks = await BEAM_CLIENT.get_beam_tasks()
+                    self.current_tasks = {task.id: task for task in new_tasks}
+                    self.update_tasks(new_tasks)
+                except Exception as e:
+                    debug(f"Error fetching tasks: {e}")
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
             Vertical(
-                Label("Incoming Results"),
-                ListView(id="results_list"),
-                id="results_upper",
+                Label("Incoming Tasks"),
+                self.TaskList(),
+                id="incoming_tasks_upper",
             )
         )
         yield Vertical(
@@ -171,33 +193,11 @@ class ResultsTab(TabPane):
             id="results_lower",
         )
 
-    async def on_mount(self) -> None:
-        await self._load_results()
-
-    async def watch_results(self, results: List[dict[str, Any]]) -> None:
-        lv = self.query_one("#results_list", ListView)
-        lv.clear()
-        for item in results:
-            summary = json.dumps(item)[:120]
-            lv.append(ListItem(Label(summary)))
-
-    async def _load_results(self) -> None:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(RESULTS_ENDPOINT)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as e:
-            data = [{"id": 1, "status": "success", "message": f"Demo (error: {e})"}]
-        if isinstance(data, list):
-            self.results = data
-        elif isinstance(data, dict):
-            self.results = data.get("items", [data])
 
     @on(Button.Pressed, "#res_submit")
     def _on_res_submit(self) -> None:
         payload = self._collect_form()
-        lv = self.query_one("#results_list", ListView)
+        lv = self.query_one("#incoming_tasks_list", ListView)
         lv.append(ListItem(Label(json.dumps(payload)[:120])))
 
     def action_submit_result(self) -> None:
@@ -216,7 +216,7 @@ class ResultsTab(TabPane):
 
 class TasksResultsApp(App):
     CSS = """
-    #tasks_upper, #results_upper {
+    #tasks_upper, #incoming_tasks_upper {
         height: 1fr;
         border: tall $surface;
         padding: 1;
@@ -248,7 +248,7 @@ class TasksResultsApp(App):
         with TabbedContent():
             with TasksTab("Outgoing Tasks"):
                 pass
-            with ResultsTab("Incoming Tasks"):
+            with IncomingTasksTab("Incoming Tasks"):
                 pass
         yield Footer()
 
