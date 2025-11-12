@@ -75,3 +75,6 @@ __textual_dev__/
 .cache/
 tmp/
 
+# Beam certs
+pki/
+!pki/root.crt.pem

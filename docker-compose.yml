@@ -1,0 +1,18 @@
+services:
+  beam-proxy:
+    image: samply/beam-proxy:develop-sockets
+    ports:
+      - 8081:8081
+    environment:
+      BROKER_URL: https://${BROKER_ID}
+      PROXY_ID: ${PROXY_ID}
+      APP_bb-beam_KEY: ${BEAM_APIKEY}
+    secrets:
+      - privkey.pem
+      - root.crt.pem
+
+secrets:
+  privkey.pem:
+    file: ./pki/proxy.priv.pem
+  root.crt.pem:
+    file: ./pki/root.crt.pem

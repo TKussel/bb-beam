@@ -9,16 +9,19 @@ import json
 import os
 from typing import Any, List
 
-import uuid
-import httpx
+from dotenv import load_dotenv
+from pydantic.types import UUID4
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.message import Message
+from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
+from textual.widget import Widget
+from textual.widgets.data_table import RowKey
+from beam import BeamClient, BeamResult, BeamTask, BeamWorkStatus
 from textual.widgets import (
     Button,
+    DataTable,
     Footer,
     Header,
     Input,
@@ -33,16 +36,25 @@ from textual.widgets import (
     Pretty
 )
 
-class UpdateTasks(Message):
-    def __init__(self, items: dict):
-        self.items = items
-        super().__init__()
+load_dotenv()
 
+BEAM_PROXY_URL = os.getenv("BEAM_PROXY_URL", "http://localhost:8081")
+BEAM_APIKEY = os.getenv("BEAM_APIKEY")
+PROXY_ID = os.getenv("PROXY_ID")
+APP_ID = f"bb-beam.{PROXY_ID}"
 RESULTS_ENDPOINT = os.getenv("RESULTS_ENDPOINT", "https://httpbin.org/json")
-TASKS_LIST_PLACEHOLDER = [
-    "Sent: Task 1",
-    "New Task",
-]
+BEAM_CLIENT = BeamClient(APP_ID, BEAM_APIKEY, BEAM_PROXY_URL)
+
+__log_file = open("bb-beam.log", "a+")
+def debug(*args, **kwargs):
+    print(*args, **kwargs, file=__log_file)
+    __log_file.flush()
+
+def parse_json_or_text(value: str) -> Any:
+    try:
+        return json.loads(value) if value else {}
+    except Exception:
+        return value
 
 class SectionTitle(Static):
     def __init__(self, text: str) -> None:
@@ -52,7 +64,7 @@ class NonFocusableVertical(Vertical):
     can_focus=False
 
 class TaskLabel(Label):
-    def __init__(self, task_id, *args, **kwargs):
+    def __init__(self, task_id: UUID4, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.task_id = task_id
 
@@ -60,29 +72,55 @@ class TaskLabel(Label):
 class TasksTab(TabPane):
     BINDINGS = [Binding("ctrl+enter", "submit_task", "Submit Task")]
 
-    class Submitted(Message):
-        def __init__(self, payload: dict[str, Any]) -> None:
-            self.payload = payload
-            super().__init__()
+    class TaskPreview(Static):
 
-    @on(UpdateTasks)
-    def update_task_list(self, message: UpdateTasks):
-        list_view = self.query_one("#tasks_list", ListView)
-        list_view.clear()
-        self.notify("Updating task")
-        for k, v in message.items.items():
-            list_view.append(ListItem(TaskLabel(v.get("id") ,f"{k}")))
+        def __init__(self, task: BeamTask, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.beam_task = task
+
+        async def on_mount(self) -> None:
+            self.table = DataTable(cursor_type="row")
+            await self.mount(Pretty(self.beam_task))
+            await self.mount(self.table)
+            self.table.add_columns("From", "Body", "Status")
+            self.task_rows: dict[str, RowKey] = {}
+            self.result_fetch_task = asyncio.create_task(self.watch_results())
+
+        async def on_unmount(self) -> None:
+            self.result_fetch_task.cancel()
+            try:
+                await self.result_fetch_task
+            except asyncio.CancelledError:
+                pass
+
+        def update_results(self, new_results: List[BeamResult]):
+            for result in new_results:
+                if result.from_ not in self.task_rows:
+                    row_key = self.table.add_row(result.from_, result.body, result.status)
+                    self.task_rows[result.from_] = row_key
+                else:
+                    row_key = self.task_rows[result.from_]
+                    self.table.update_cell(row_key, "Body", result.body)
+                    self.table.update_cell(row_key, "Status", result.status)
+
+        async def watch_results(self) -> None:
+            while True:
+                try:
+                    new_results = await BEAM_CLIENT.get_task_results(self.beam_task.id)
+                    self.update_results(new_results)
+                except Exception as e:
+                    debug(f"Error fetching tasks: {e}")
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
             Vertical(
                 SectionTitle("Sent Tasks"),
-                ListView(*[ListItem(TaskLabel(v.get("id"), k)) for (k, v) in self.app.tasks.items()], id="tasks_list"),
+                ListView(*[ListItem(TaskLabel(v.id, k)) for (k, v) in self.app.tasks.items()], id="tasks_list"),
                 id="tasks_upper_left",
             ),
             NonFocusableVertical(
                 SectionTitle("Preview / Details"),
-                Pretty("Select a task from the list to show it and its results here.", id="tasks_preview"),
+                Container(Pretty("Select a task from the list to show it and its results here."), id="tasks_preview"),
                 id="tasks_upper_right",
             ),
             id="tasks_upper",
@@ -100,53 +138,91 @@ class TasksTab(TabPane):
         )
 
     @on(ListView.Highlighted, "#tasks_list")
-    def _on_task_list_highlight(self, event: ListView.Highlighted) -> None:
+    async def _on_task_list_highlight(self, event: ListView.Highlighted) -> None:
         label = event.item.query_one(TaskLabel)
-        self.notify(f"{label}")
-        self.query_one("#tasks_preview", Pretty).update(self.app.tasks.get(label.content))
+        task: BeamTask = self.app.tasks.get(label.task_id)
+        preview = self.query_one("#tasks_preview", Container)
+        await preview.remove_children()
+        await preview.mount(self.TaskPreview(task))
 
     @on(Button.Pressed, "#task_submit")
-    def _on_task_submit(self) -> None:
-        payload = self._collect_form()
-        self.post_message(self.Submitted(payload))
-        tasks_list = self.query_one("#tasks_list", ListView)
-        tasks_list.append(ListItem(Label(f"Sent: {payload.get('id','?')}")))
-
-    def action_submit_task(self) -> None:
-        self._on_task_submit()
-
-    def _collect_form(self) -> dict[str, Any]:
-        return {
-            "id": uuid.uuid4(),
-            "to": [x.strip() for x in self.query_one("#task_to", Input).value.split(',')],
-            "metadata": self._parse_json_or_text(self.query_one("#task_metadata", Input).value),
-            "ttl": self.query_one("#task_ttl", Input).value.strip(),
-            "body": self.query_one("#task_body", TextArea).text.strip(),
-        }
-
-    @staticmethod
-    def _parse_json_or_text(value: str) -> Any:
+    async def _on_task_submit(self) -> None:
+        task = self._collect_form()
         try:
-            return json.loads(value) if value else {}
-        except Exception:
-            return value
+            await BEAM_CLIENT.post_beam_task(task)
+        except Exception as e:
+            preview = self.query_one("#tasks_preview", Container)
+            await preview.remove_children()
+            await preview.mount(Pretty(f"Error: {e}"))
+        else:
+            self.app.tasks[task.id] = task
+        tasks_list = self.query_one("#tasks_list", ListView)
+        tasks_list.append(ListItem(TaskLabel(task.id, f"Sent: {task.id}")))
 
-class ResultsTab(TabPane):
+    def _collect_form(self) -> BeamTask:
+        to = self.query_one("#task_to", Input).value.strip()
+        if to:
+            to_value = list(map(str.strip, to.split(',')))
+        else:
+            to_value = [APP_ID]
+        body = self.query_one("#task_body", TextArea)
+        body_val = body.text.strip()
+        body.text = ""
+        return BeamTask(
+            from_=APP_ID,
+            to=to_value,
+            metadata=parse_json_or_text(self.query_one("#task_metadata", Input).value) or None,
+            ttl=self.query_one("#task_ttl", Input).value.strip() or "30s",
+            body=body_val,
+            failure_strategy="discard"
+        )
+
+
+class IncomingTasksTab(TabPane):
     BINDINGS = [Binding("r", "refresh", "Refresh Results"), Binding("ctrl+enter", "submit_result", "Submit Result")]
 
-    results: reactive[List[dict[str, Any]]] = reactive([], layout=True)
+    class TaskList(Static):
+        all_tasks: dict[UUID4, BeamTask] = {}
 
-    class Submitted(Message):
-        def __init__(self, payload: dict[str, Any]) -> None:
-            self.payload = payload
-            super().__init__()
+        async def on_mount(self) -> None:
+            self.table = DataTable(cursor_type="row")
+            await self.mount(self.table)
+            [_id, _from, _body, result_col] = self.table.add_columns("ID", "From", "Body", "Result")
+            self.result_col = result_col
+            self.task_rows: dict[UUID4, RowKey] = {}
+            asyncio.create_task(self.watch_tasks())
+
+        def get_selected_task(self) -> BeamTask | None:
+            row_key = self.table.coordinate_to_cell_key(self.table.cursor_coordinate).row_key
+            for task_id, stored_row_key in self.task_rows.items():
+                if stored_row_key == row_key:
+                    return self.all_tasks[task_id]
+
+        def update_task_result(self, task_id: UUID4, result: str):
+            row_key = self.task_rows[task_id]
+            self.table.update_cell(row_key, self.result_col, result)
+
+        def update_tasks(self, new_tasks: List[BeamTask]):
+            for task in new_tasks:
+                if task.id not in self.task_rows:
+                    row_key = self.table.add_row(task.id, task.from_, task.body, "Awaiting response")
+                    self.task_rows[task.id] = row_key
+
+        async def watch_tasks(self) -> None:
+            while True:
+                try:
+                    new_tasks = await BEAM_CLIENT.get_beam_tasks()
+                    self.all_tasks = {**self.all_tasks, **{task.id: task for task in new_tasks}}
+                    self.update_tasks(new_tasks)
+                except Exception as e:
+                    debug(f"Error fetching tasks: {e}")
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
             Vertical(
-                Label("Incoming Results"),
-                ListView(id="results_list"),
-                id="results_upper",
+                Label("Incoming Tasks"),
+                self.TaskList(),
+                id="incoming_tasks_upper",
             )
         )
         yield Vertical(
@@ -157,7 +233,7 @@ class ResultsTab(TabPane):
                     Label("status"),
                     Select(
                         (
-                            ("success", "success"),
+                            ("success", "succeeded"),
                             ("claimed", "claimed"),
                             ("tempfailed", "tempfailed"),
                             ("permfailed", "permfailed"),
@@ -172,53 +248,28 @@ class ResultsTab(TabPane):
             id="results_lower",
         )
 
-    async def on_mount(self) -> None:
-        await self._load_results()
-
-    async def watch_results(self, results: List[dict[str, Any]]) -> None:
-        lv = self.query_one("#results_list", ListView)
-        lv.clear()
-        for item in results:
-            summary = json.dumps(item)[:120]
-            lv.append(ListItem(Label(summary)))
-
-    async def _load_results(self) -> None:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(RESULTS_ENDPOINT)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as e:
-            data = [{"id": 1, "status": "success", "message": f"Demo (error: {e})"}]
-        if isinstance(data, list):
-            self.results = data
-        elif isinstance(data, dict):
-            self.results = data.get("items", [data])
 
     @on(Button.Pressed, "#res_submit")
-    def _on_res_submit(self) -> None:
-        payload = self._collect_form()
-        self.post_message(self.Submitted(payload))
-        lv = self.query_one("#results_list", ListView)
-        lv.append(ListItem(Label(json.dumps(payload)[:120])))
-
-    def action_submit_result(self) -> None:
-        self._on_res_submit()
-
-    def _collect_form(self) -> dict[str, Any]:
-        meta_raw = self.query_one("#res_metadata", Input).value
-        try:
-            metadata = json.loads(meta_raw) if meta_raw else {}
-        except Exception:
-            metadata = meta_raw
-        status = self.query_one("#res_status", Select).value or "success"
+    async def answer_task(self) -> None:
+        task_list = self.query_one(self.TaskList)
+        task = task_list.get_selected_task()
+        if task is None:
+            self.notify("Please select a task")
+            return
         body = self.query_one("#res_body", TextArea).text.strip()
-        return {"metadata": metadata, "status": status, "body": body}
-
+        status = self.query_one("#res_status", Select).value
+        if status == Select.BLANK:
+            status = "succeeded"
+        metadata = parse_json_or_text(self.query_one("#res_metadata", Input).value)
+        try:
+            await BEAM_CLIENT.answer_task(task, body, status, metadata)  # pyright: ignore[reportArgumentType]
+        except Exception as e:
+            self.notify(f"Failed to submit result: {e}")
+        task_list.update_task_result(task.id, str(status))
 
 class TasksResultsApp(App):
     CSS = """
-    #tasks_upper, #results_upper {
+    #tasks_upper, #incoming_tasks_upper {
         height: 1fr;
         border: tall $surface;
         padding: 1;
@@ -243,35 +294,20 @@ class TasksResultsApp(App):
     """
 
     TITLE = "Tasks & Results"
-    tasks = reactive({})
+    tasks: reactive[dict[UUID4, BeamTask]] = reactive({})
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with TabbedContent():
             with TasksTab("Outgoing Tasks"):
                 pass
-            with ResultsTab("Incoming Tasks"):
+            with IncomingTasksTab("Incoming Tasks"):
                 pass
         yield Footer()
 
     def __init__(self):
         super().__init__()
-        self.tasks = {"Empty": json.loads('{"id": "0000-0000", "text": "Nothing to display"}')}
-        self.notify(f"")
-
-    @on(TasksTab.Submitted)
-    def _on_task_submitted(self, message: TasksTab.Submitted) -> None:
-        self.bell()
-        self.tasks[message.payload.get('id')] = message.payload
-        self.post_message(UpdateTasks(self.tasks))
-        self.notify(f"Task created: {message.payload.get('to','(no to)')}")
-
-    @on(ResultsTab.Submitted)
-    def _on_result_submitted(self, message: ResultsTab.Submitted) -> None:
-        self.bell()
-        self.notify(f"Result submitted: {message.payload.get('status','success')}")
 
 if __name__ == "__main__":
     app = TasksResultsApp()
     app.run()
-
