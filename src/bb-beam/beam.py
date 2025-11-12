@@ -72,8 +72,10 @@ class BeamClient:
         response = await self.client.put(f"{self.base_url}/v1/tasks/{task.id}/results/{self.app_id}", content=result.model_dump_json(by_alias=True))
         response.raise_for_status()
 
-    async def stream_task_results(self, task_id: UUID) -> AsyncGenerator[BeamTask, None]:
-        async with httpx_sse.aconnect_sse(self.client, "GET", f"{self.base_url}/v1/tasks/{task_id}") as event_stream:
-            event_stream.response.raise_for_status()
-            async for event in event_stream.aiter_sse():
-                yield BeamTask.model_validate_json(event.data)
+    async def get_task_results(self, task_id: UUID) -> list[BeamResult]:
+        response = await self.client.get(f"{self.base_url}/v1/tasks/{task_id}/results", params={
+            "wait_time": "1s"
+        })
+        response.raise_for_status()
+        result_json = response.json()
+        return [BeamResult.model_validate(result) for result in result_json]

@@ -14,11 +14,11 @@ from pydantic.types import UUID4
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets.data_table import RowKey
-from beam import BeamClient, BeamTask, BeamWorkStatus
+from beam import BeamClient, BeamResult, BeamTask, BeamWorkStatus
 from textual.widgets import (
     Button,
     DataTable,
@@ -72,6 +72,45 @@ class TaskLabel(Label):
 class TasksTab(TabPane):
     BINDINGS = [Binding("ctrl+enter", "submit_task", "Submit Task")]
 
+    class TaskPreview(Static):
+
+        def __init__(self, task: BeamTask, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.beam_task = task
+
+        async def on_mount(self) -> None:
+            self.table = DataTable(cursor_type="row")
+            await self.mount(Pretty(self.beam_task))
+            await self.mount(self.table)
+            self.table.add_columns("From", "Body", "Status")
+            self.task_rows: dict[str, RowKey] = {}
+            self.result_fetch_task = asyncio.create_task(self.watch_results())
+
+        async def on_unmount(self) -> None:
+            self.result_fetch_task.cancel()
+            try:
+                await self.result_fetch_task
+            except asyncio.CancelledError:
+                pass
+
+        def update_results(self, new_results: List[BeamResult]):
+            for result in new_results:
+                if result.from_ not in self.task_rows:
+                    row_key = self.table.add_row(result.from_, result.body, result.status)
+                    self.task_rows[result.from_] = row_key
+                else:
+                    row_key = self.task_rows[result.from_]
+                    self.table.update_cell(row_key, "Body", result.body)
+                    self.table.update_cell(row_key, "Status", result.status)
+
+        async def watch_results(self) -> None:
+            while True:
+                try:
+                    new_results = await BEAM_CLIENT.get_task_results(self.beam_task.id)
+                    self.update_results(new_results)
+                except Exception as e:
+                    debug(f"Error fetching tasks: {e}")
+
     def compose(self) -> ComposeResult:
         yield Horizontal(
             Vertical(
@@ -81,7 +120,7 @@ class TasksTab(TabPane):
             ),
             NonFocusableVertical(
                 SectionTitle("Preview / Details"),
-                Pretty("Select a task from the list to show it and its results here.", id="tasks_preview"),
+                Container(Pretty("Select a task from the list to show it and its results here."), id="tasks_preview"),
                 id="tasks_upper_right",
             ),
             id="tasks_upper",
@@ -99,10 +138,12 @@ class TasksTab(TabPane):
         )
 
     @on(ListView.Highlighted, "#tasks_list")
-    def _on_task_list_highlight(self, event: ListView.Highlighted) -> None:
+    async def _on_task_list_highlight(self, event: ListView.Highlighted) -> None:
         label = event.item.query_one(TaskLabel)
-        task: BeamTask = self.app.tasks.get(label.task_id, "Gone")
-        self.query_one("#tasks_preview", Pretty).update(task)
+        task: BeamTask = self.app.tasks.get(label.task_id)
+        preview = self.query_one("#tasks_preview", Container)
+        await preview.remove_children()
+        await preview.mount(self.TaskPreview(task))
 
     @on(Button.Pressed, "#task_submit")
     async def _on_task_submit(self) -> None:
@@ -110,7 +151,9 @@ class TasksTab(TabPane):
         try:
             await BEAM_CLIENT.post_beam_task(task)
         except Exception as e:
-            self.query_one("#tasks_preview", Pretty).update(f"Error: {e}")
+            preview = self.query_one("#tasks_preview", Container)
+            await preview.remove_children()
+            await preview.mount(Pretty(f"Error: {e}"))
         else:
             self.app.tasks[task.id] = task
         tasks_list = self.query_one("#tasks_list", ListView)
@@ -143,7 +186,7 @@ class IncomingTasksTab(TabPane):
 
         async def on_mount(self) -> None:
             self.table = DataTable(cursor_type="row")
-            self.mount(self.table)
+            await self.mount(self.table)
             [_id, _from, _body, result_col] = self.table.add_columns("ID", "From", "Body", "Result")
             self.result_col = result_col
             self.task_rows: dict[UUID4, RowKey] = {}
