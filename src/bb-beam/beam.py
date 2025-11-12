@@ -1,9 +1,9 @@
+import asyncio
+from pathlib import Path
 from typing import Any, AsyncGenerator, List, Literal, Optional
 from uuid import UUID, uuid4
 
 import httpx
-import json
-from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -20,42 +20,50 @@ class BeamTask(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: UUID = Field(default_factory=uuid4)
-    from_: str = Field(alias='from')
+    from_: str = Field(alias="from")
     to: List[str]
     body: str
     failure_strategy: FailureStrategy | Literal["discard"]
     ttl: str
     metadata: Optional[Any] = None
 
+
 BeamWorkStatus = Literal["claimed", "succeeded", "tempfailed", "permfailed"]
+
 
 class BeamResult(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     task: UUID
-    from_: str = Field(alias='from')
+    from_: str = Field(alias="from")
     to: List[str]
     body: str
     status: BeamWorkStatus
     metadata: Optional[Any] = None
 
+
 class FileMetadata(BaseModel):
     filename: str
     task: UUID
+
 
 class BeamSocketRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: UUID
-    from_: str = Field(alias='from')
+    from_: str = Field(alias="from")
     to: List[str]
     metadata: FileMetadata
+
 
 class BeamClient:
     def __init__(self, app_id, beam_apikey, beam_proxy_url):
         self.base_url = beam_proxy_url
         self.app_id = app_id
-        self.client = httpx.AsyncClient(headers={"Authorization": f"ApiKey {app_id} {beam_apikey}"})
+        self.api_key = beam_apikey
+        self.client = httpx.AsyncClient(
+            headers={"Authorization": f"ApiKey {app_id} {beam_apikey}"}
+        )
 
     async def post_beam_task(self, task: BeamTask):
         json = task.model_dump_json(by_alias=True)
@@ -63,64 +71,97 @@ class BeamClient:
         response.raise_for_status()
 
     async def get_beam_tasks(self) -> list[BeamTask]:
-        response = await self.client.get(f"{self.base_url}/v1/tasks", params={
-            "filter": "todo",
-            "wait_time": "1s"
-        })
+        response = await self.client.get(
+            f"{self.base_url}/v1/tasks", params={"filter": "todo", "wait_time": "1s"}
+        )
         response.raise_for_status()
         tasks_data = response.json()
         beam_tasks = [BeamTask.model_validate(task_data) for task_data in tasks_data]
         return beam_tasks
 
-    async def answer_task(self, task: BeamTask, body: str, workstatus: BeamWorkStatus = "succeeded", metadata: Optional[Any] = None):
+    async def answer_task(
+        self,
+        task: BeamTask,
+        body: str,
+        workstatus: BeamWorkStatus = "succeeded",
+        metadata: Optional[Any] = None,
+    ):
         result = BeamResult(
             task=task.id,
             from_=self.app_id,
             to=[task.from_],
             body=body,
             status=workstatus,
-            metadata=metadata
+            metadata=metadata,
         )
-        response = await self.client.put(f"{self.base_url}/v1/tasks/{task.id}/results/{self.app_id}", content=result.model_dump_json(by_alias=True))
+        response = await self.client.put(
+            f"{self.base_url}/v1/tasks/{task.id}/results/{self.app_id}",
+            content=result.model_dump_json(by_alias=True),
+        )
         response.raise_for_status()
 
     async def get_task_results(self, task_id: UUID) -> list[BeamResult]:
-        response = await self.client.get(f"{self.base_url}/v1/tasks/{task_id}/results", params={
-            "wait_time": "1s"
-        })
+        response = await self.client.get(
+            f"{self.base_url}/v1/tasks/{task_id}/results", params={"wait_time": "1s"}
+        )
         if response.status_code == 404:
-            raise ValueError(f"Task gone")
+            raise ValueError("Task gone")
         response.raise_for_status()
         result_json = response.json()
         return [BeamResult.model_validate(result) for result in result_json]
 
     async def upload_file_for(self, task: BeamTask, file_path: Path):
-        with file_path.open("rb") as file:
-            content = file.read()
+        from main import debug
 
-        meta = FileMetadata(filename=file_path.name, task=task.id)
-        response = await self.client.post(f"{self.base_url}/v1/sockets/{task.from_}", headers={
-            "metadata": meta.model_dump_json(),
-            "upgrade": "tcp"
-        })
-        response.raise_for_status()
-        stream = response.extensions["network_stream"]
-        stream.write(content)
-        stream.close()
+        to = ".".join(task.from_.split(".")[:2])
+        proc = await asyncio.subprocess.create_subprocess_exec(
+            "docker",
+            "run",
+            "--rm",
+            "--net=host",
+            "-v",
+            f"{file_path.resolve()}:{file_path.resolve()}",
+            "samply/beam-file",
+            "--beam-url",
+            self.base_url,
+            "--beam-secret",
+            self.api_key,
+            "--beam-id",
+            self.app_id,
+            "send",
+            "--to",
+            to,
+            f"{file_path.resolve()}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        if (await proc.wait()) != 0:
+            stdout = await proc.stdout.read()
+            debug("Error", stdout.decode())
 
-    async def get_socket_request(self) -> BeamSocketRequest:
-        response = await self.client.get(f"{self.base_url}/v1/sockets", params={
-            "wait_count": "1"
-        })
+    async def get_socket_request(self) -> BeamSocketRequest | None:
+        response = await self.client.get(
+            f"{self.base_url}/v1/sockets", params={"wait_count": "1", "wait_time": "2s"}
+        )
         response.raise_for_status()
-        return BeamSocketRequest.model_validate(response.json()[0])
+        json = response.json()
+        if len(json) == 0:
+            return None
+        return BeamSocketRequest.model_validate(json[0])
 
     async def download_file_for(self, socket_request: BeamSocketRequest) -> bytes:
-        response = await self.client.get(f"{self.base_url}/v1/sockets/{socket_request.id}", headers={
-            "upgrade": "tcp"
-        })
-        response.raise_for_status()
+        response = await self.client.get(
+            f"{self.base_url}/v1/sockets/{socket_request.id}",
+            headers={"upgrade": "tcp"},
+            timeout=None,
+        )
+        if response.status_code != 101:
+            response.raise_for_status()
+
         stream = response.extensions["network_stream"]
-        content = await stream.read()
-        stream.close()
+        content = await stream.read(max_bytes=64)
+        try:
+            await stream.aclose()
+        except Exception:
+            pass
         return content

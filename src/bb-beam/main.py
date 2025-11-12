@@ -2,6 +2,7 @@
 Fixed CSS properties for Textual (replacing unsupported `column-gap` and `row-gap`).
 Textual App Skeleton with Two Tabs: (a) Tasks and (b) Results
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +35,7 @@ from textual.widgets import (
     TabPane,
     TextArea,
     Static,
-    Pretty
+    Pretty,
 )
 
 load_dotenv()
@@ -47,15 +48,19 @@ RESULTS_ENDPOINT = os.getenv("RESULTS_ENDPOINT", "https://httpbin.org/json")
 BEAM_CLIENT = BeamClient(APP_ID, BEAM_APIKEY, BEAM_PROXY_URL)
 
 __log_file = open("bb-beam.log", "a+")
+
+
 def debug(*args, **kwargs):
     print(*args, **kwargs, file=__log_file)
     __log_file.flush()
+
 
 def parse_json_or_text(value: str) -> Any:
     try:
         return json.loads(value) if value else {}
     except Exception:
         return value
+
 
 def list_files(path: str) -> List[str]:
     if not os.path.exists(path):
@@ -67,12 +72,15 @@ def list_files(path: str) -> List[str]:
     except PermissionError:
         return []
 
+
 class SectionTitle(Static):
     def __init__(self, text: str) -> None:
         super().__init__(text)
 
+
 class NonFocusableVertical(Vertical):
-    can_focus=False
+    can_focus = False
+
 
 class TaskLabel(Label):
     def __init__(self, task_id: UUID4, *args, **kwargs):
@@ -84,7 +92,6 @@ class TasksTab(TabPane):
     BINDINGS = [Binding("ctrl+enter", "submit_task", "Submit Task")]
 
     class TaskPreview(Static):
-
         def __init__(self, task: BeamTask, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.beam_task = task
@@ -103,13 +110,22 @@ class TasksTab(TabPane):
         def update_results(self, new_results: List[BeamResult]):
             for result in new_results:
                 if result.from_ not in self.task_rows:
-                    row_key = self.table.add_row(result.from_, result.body, result.status, list_files(f"./files/{result.task}/{result.from_}"))
+                    row_key = self.table.add_row(
+                        result.from_,
+                        result.body,
+                        result.status,
+                        list_files(f"./files/{result.task}/{result.from_}"),
+                    )
                     self.task_rows[result.from_] = row_key
                 else:
                     row_key = self.task_rows[result.from_]
                     self.table.update_cell(row_key, "Body", result.body)
                     self.table.update_cell(row_key, "Status", result.status)
-                    self.table.update_cell(row_key, "Files", list_files(f"./files/{result.task}/{result.from_}"))
+                    self.table.update_cell(
+                        row_key,
+                        "Files",
+                        list_files(f"./files/{result.task}/{result.from_}"),
+                    )
 
         async def watch_results(self) -> None:
             while True:
@@ -127,12 +143,23 @@ class TasksTab(TabPane):
         yield Horizontal(
             Vertical(
                 SectionTitle("Sent Tasks"),
-                ListView(*[ListItem(TaskLabel(v.id, k)) for (k, v) in self.app.tasks.items()], id="tasks_list"),
+                ListView(
+                    *[
+                        ListItem(TaskLabel(v.id, k))
+                        for (k, v) in self.app.tasks.items()
+                    ],
+                    id="tasks_list",
+                ),
                 id="tasks_upper_left",
             ),
             NonFocusableVertical(
                 SectionTitle("Preview / Details"),
-                Container(Pretty("Select a task from the list to show it and its results here."), id="tasks_preview"),
+                Container(
+                    Pretty(
+                        "Select a task from the list to show it and its results here."
+                    ),
+                    id="tasks_preview",
+                ),
                 id="tasks_upper_right",
             ),
             id="tasks_upper",
@@ -140,10 +167,24 @@ class TasksTab(TabPane):
         yield Vertical(
             SectionTitle("Create Task"),
             Vertical(
-                Horizontal(Label("to"), Input(placeholder="app.proxy.broker.beam-workshop.de, app.proxy2.broker.beam-workshop.de", id="task_to")),
-                Horizontal(Label("metadata"), Input(placeholder='{"test": ["testmeta1", "testmeta2"]}', id="task_metadata")),
+                Horizontal(
+                    Label("to"),
+                    Input(
+                        placeholder="app.proxy.broker.beam-workshop.de, app.proxy2.broker.beam-workshop.de",
+                        id="task_to",
+                    ),
+                ),
+                Horizontal(
+                    Label("metadata"),
+                    Input(
+                        placeholder='{"test": ["testmeta1", "testmeta2"]}',
+                        id="task_metadata",
+                    ),
+                ),
                 Horizontal(Label("ttl"), Input(placeholder="e.g. 30s", id="task_ttl")),
-                Horizontal(Label("body"), TextArea(placeholder="task body", id="task_body")),
+                Horizontal(
+                    Label("body"), TextArea(placeholder="task body", id="task_body")
+                ),
             ),
             Button("Submit Task", id="task_submit", variant="primary"),
             id="tasks_lower",
@@ -174,7 +215,7 @@ class TasksTab(TabPane):
     def _collect_form(self) -> BeamTask:
         to = self.query_one("#task_to", Input).value.strip()
         if to:
-            to_value = list(map(str.strip, to.split(',')))
+            to_value = list(map(str.strip, to.split(",")))
         else:
             to_value = [APP_ID]
         body = self.query_one("#task_body", TextArea)
@@ -183,15 +224,19 @@ class TasksTab(TabPane):
         return BeamTask(
             from_=APP_ID,
             to=to_value,
-            metadata=parse_json_or_text(self.query_one("#task_metadata", Input).value) or None,
-            ttl=self.query_one("#task_ttl", Input).value.strip() or "30s",
+            metadata=parse_json_or_text(self.query_one("#task_metadata", Input).value)
+            or None,
+            ttl=self.query_one("#task_ttl", Input).value.strip() or "60s",
             body=body_val,
-            failure_strategy="discard"
+            failure_strategy="discard",
         )
 
 
 class IncomingTasksTab(TabPane):
-    BINDINGS = [Binding("r", "refresh", "Refresh Results"), Binding("ctrl+enter", "submit_result", "Submit Result")]
+    BINDINGS = [
+        Binding("r", "refresh", "Refresh Results"),
+        Binding("ctrl+enter", "submit_result", "Submit Result"),
+    ]
 
     class TaskList(Static):
         all_tasks: dict[UUID4, BeamTask] = {}
@@ -199,13 +244,17 @@ class IncomingTasksTab(TabPane):
         async def on_mount(self) -> None:
             self.table = DataTable(cursor_type="row")
             await self.mount(self.table)
-            [_id, _from, _body, result_col] = self.table.add_columns("ID", "From", "Body", "Result")
+            [_id, _from, _body, result_col] = self.table.add_columns(
+                "ID", "From", "Body", "Result"
+            )
             self.result_col = result_col
             self.task_rows: dict[UUID4, RowKey] = {}
             asyncio.create_task(self.watch_tasks())
 
         def get_selected_task(self) -> BeamTask | None:
-            row_key = self.table.coordinate_to_cell_key(self.table.cursor_coordinate).row_key
+            row_key = self.table.coordinate_to_cell_key(
+                self.table.cursor_coordinate
+            ).row_key
             for task_id, stored_row_key in self.task_rows.items():
                 if stored_row_key == row_key:
                     return self.all_tasks[task_id]
@@ -217,7 +266,9 @@ class IncomingTasksTab(TabPane):
         def update_tasks(self, new_tasks: List[BeamTask]):
             for task in new_tasks:
                 if task.id not in self.task_rows:
-                    row_key = self.table.add_row(task.id, task.from_, task.body, "Awaiting response")
+                    row_key = self.table.add_row(
+                        task.id, task.from_, task.body, "Awaiting response"
+                    )
                     self.task_rows[task.id] = row_key
 
         async def watch_tasks(self) -> None:
@@ -227,7 +278,10 @@ class IncomingTasksTab(TabPane):
                 except Exception as e:
                     debug(f"Error fetching tasks: {e}")
                 else:
-                    self.all_tasks = {**self.all_tasks, **{task.id: task for task in new_tasks}}
+                    self.all_tasks = {
+                        **self.all_tasks,
+                        **{task.id: task for task in new_tasks},
+                    }
                     self.update_tasks(new_tasks)
 
     def compose(self) -> ComposeResult:
@@ -241,7 +295,10 @@ class IncomingTasksTab(TabPane):
         yield Vertical(
             Label("Create & Send Result"),
             Horizontal(
-                Vertical(Label("metadata"), Input(placeholder='{"source":"tui"}', id="res_metadata")),
+                Vertical(
+                    Label("metadata"),
+                    Input(placeholder='{"source":"tui"}', id="res_metadata"),
+                ),
                 Vertical(
                     Label("status"),
                     Select(
@@ -256,11 +313,13 @@ class IncomingTasksTab(TabPane):
                 ),
                 id="res_form_row1",
             ),
+            Vertical(
+                Label("file"), Input(placeholder="Enter file path here", id="res_file")
+            ),
             Vertical(Label("body"), TextArea(placeholder="result body", id="res_body")),
             Button("Submit Result", id="res_submit", variant="primary"),
             id="results_lower",
         )
-
 
     @on(Button.Pressed, "#res_submit")
     async def answer_task(self) -> None:
@@ -274,11 +333,21 @@ class IncomingTasksTab(TabPane):
         if status == Select.BLANK:
             status = "succeeded"
         metadata = parse_json_or_text(self.query_one("#res_metadata", Input).value)
-        try:
-            await BEAM_CLIENT.answer_task(task, body, status, metadata)  # pyright: ignore[reportArgumentType]
-        except Exception as e:
-            self.notify(f"Failed to submit result: {e}")
+        file_path = self.query_one("#res_file", Input).value.strip()
+
+        async def upload():
+            try:
+                await BEAM_CLIENT.answer_task(task, body, status, metadata)  # pyright: ignore[reportArgumentType]
+                if file_path:
+                    await BEAM_CLIENT.upload_file_for(task, Path(file_path))
+            except Exception as e:
+                raise e
+                debug(f"Failed to submit result: {str(e)}")
+                self.notify(f"Failed to submit result: {e}")
+
+        asyncio.create_task(upload())
         task_list.update_task_result(task.id, str(status))
+
 
 class TasksResultsApp(App):
     CSS = """
@@ -319,24 +388,41 @@ class TasksResultsApp(App):
         yield Footer()
 
     async def watch_socket_requests(self):
-        while True:
+        while False:
             try:
+                debug("Watching socket requests")
                 socket_request = await BEAM_CLIENT.get_socket_request()
+                if socket_request is None:
+                    continue
             except Exception as e:
-                debug(f"Error while watching socket requests: {e}")
-                self.notify(f"Error while watching socket requests: {e}")
+                raise e
+                debug(f"Error while watching socket requests: {str(e)}")
+                self.notify(f"Error while watching socket requests: {str(e)}")
                 await asyncio.sleep(1)
                 continue
             if socket_request.metadata.task in self.tasks:
-                file = await BEAM_CLIENT.download_file_for(socket_request)
-                filepath = Path(f"./files/{socket_request.metadata.task}/{socket_request.from_}")
+                debug(f"Received socket request: {socket_request}")
+                try:
+                    file = await BEAM_CLIENT.download_file_for(socket_request)
+                except Exception as e:
+                    debug(f"Error while downloading file: {repr(e)}")
+                    self.notify(f"Error while downloading file: {repr(e)}")
+                    import traceback
+                    # traceback.print_exception(e, file=__log_file)
+                    traceback.print_exc(file=__log_file)
+                    # raise e
+                filepath = Path(
+                    f"./files/{socket_request.metadata.task}/{socket_request.from_}"
+                )
                 filepath.mkdir(exist_ok=True)
                 filename = socket_request.metadata.filename
                 if ".." in filename or filename == "" or filename == "/":
                     continue
                 filepath.joinpath(filename).write_bytes(file)
             else:
-                self.notify(f"Unknown socket task {socket_request.metadata.task} from {socket_request.from_}")
+                self.notify(
+                    f"Unknown socket task {socket_request.metadata.task} from {socket_request.from_}"
+                )
                 try:
                     # Connect to remove the task socket
                     await BEAM_CLIENT.download_file_for(socket_request)

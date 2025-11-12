@@ -11,6 +11,14 @@ services:
       - privkey.pem
       - root.crt.pem
 
+  beam-file:
+    image: samply/beam-file
+    environment:
+      BEAM_URL: http://beam-proxy:8081
+      BEAM_SECRET: ${BEAM_APIKEY}
+      BEAM_ID: bb-beam.${PROXY_ID}
+
+
 secrets:
   privkey.pem:
     file: ./pki/proxy.priv.pem
