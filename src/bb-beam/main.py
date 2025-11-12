@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 from typing import Any, List
 
 from dotenv import load_dotenv
@@ -56,6 +57,16 @@ def parse_json_or_text(value: str) -> Any:
     except Exception:
         return value
 
+def list_files(path: str) -> List[str]:
+    if not os.path.exists(path):
+        return []
+    if not os.path.isdir(path):
+        return []
+    try:
+        return [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
+    except PermissionError:
+        return []
+
 class SectionTitle(Static):
     def __init__(self, text: str) -> None:
         super().__init__(text)
@@ -77,14 +88,14 @@ class TasksTab(TabPane):
         def __init__(self, task: BeamTask, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.beam_task = task
+            self.task_rows: dict[str, RowKey] = {}
+            self.table = DataTable(cursor_type="row")
+            self.table.add_columns("From", "Body", "Status", "Files")
+            self.result_fetch_task = asyncio.create_task(self.watch_results())
 
         async def on_mount(self) -> None:
-            self.table = DataTable(cursor_type="row")
             await self.mount(Pretty(self.beam_task))
             await self.mount(self.table)
-            self.table.add_columns("From", "Body", "Status")
-            self.task_rows: dict[str, RowKey] = {}
-            self.result_fetch_task = asyncio.create_task(self.watch_results())
 
         async def on_unmount(self) -> None:
             self.result_fetch_task.cancel()
@@ -92,12 +103,13 @@ class TasksTab(TabPane):
         def update_results(self, new_results: List[BeamResult]):
             for result in new_results:
                 if result.from_ not in self.task_rows:
-                    row_key = self.table.add_row(result.from_, result.body, result.status)
+                    row_key = self.table.add_row(result.from_, result.body, result.status, list_files(f"./files/{result.task}/{result.from_}"))
                     self.task_rows[result.from_] = row_key
                 else:
                     row_key = self.task_rows[result.from_]
                     self.table.update_cell(row_key, "Body", result.body)
                     self.table.update_cell(row_key, "Status", result.status)
+                    self.table.update_cell(row_key, "Files", list_files(f"./files/{result.task}/{result.from_}"))
 
         async def watch_results(self) -> None:
             while True:
@@ -305,6 +317,34 @@ class TasksResultsApp(App):
             with IncomingTasksTab("Incoming Tasks"):
                 pass
         yield Footer()
+
+    async def watch_socket_requests(self):
+        while True:
+            try:
+                socket_request = await BEAM_CLIENT.get_socket_request()
+            except Exception as e:
+                debug(f"Error while watching socket requests: {e}")
+                self.notify(f"Error while watching socket requests: {e}")
+                await asyncio.sleep(1)
+                continue
+            if socket_request.metadata.task in self.tasks:
+                file = await BEAM_CLIENT.download_file_for(socket_request)
+                filepath = Path(f"./files/{socket_request.metadata.task}/{socket_request.from_}")
+                filepath.mkdir(exist_ok=True)
+                filename = socket_request.metadata.filename
+                if ".." in filename or filename == "" or filename == "/":
+                    continue
+                filepath.joinpath(filename).write_bytes(file)
+            else:
+                self.notify(f"Unknown socket task {socket_request.metadata.task} from {socket_request.from_}")
+                try:
+                    # Connect to remove the task socket
+                    await BEAM_CLIENT.download_file_for(socket_request)
+                except Exception:
+                    pass
+
+    def on_mount(self):
+        asyncio.create_task(self.watch_socket_requests())
 
     def __init__(self):
         super().__init__()

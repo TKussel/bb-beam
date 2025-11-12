@@ -78,3 +78,6 @@ tmp/
 # Beam certs
 pki/
 !pki/root.crt.pem
+
+# Downloaded files
+files/
