@@ -76,6 +76,8 @@ class BeamClient:
         response = await self.client.get(f"{self.base_url}/v1/tasks/{task_id}/results", params={
             "wait_time": "1s"
         })
+        if response.status_code == 404:
+            raise ValueError(f"Task gone")
         response.raise_for_status()
         result_json = response.json()
         return [BeamResult.model_validate(result) for result in result_json]

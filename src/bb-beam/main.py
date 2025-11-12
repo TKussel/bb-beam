@@ -88,10 +88,6 @@ class TasksTab(TabPane):
 
         async def on_unmount(self) -> None:
             self.result_fetch_task.cancel()
-            try:
-                await self.result_fetch_task
-            except asyncio.CancelledError:
-                pass
 
         def update_results(self, new_results: List[BeamResult]):
             for result in new_results:
@@ -107,9 +103,13 @@ class TasksTab(TabPane):
             while True:
                 try:
                     new_results = await BEAM_CLIENT.get_task_results(self.beam_task.id)
-                    self.update_results(new_results)
+                except ValueError:
+                    self.query_one(Pretty).update("Task gone")
+                    break
                 except Exception as e:
                     debug(f"Error fetching tasks: {e}")
+                else:
+                    self.update_results(new_results)
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
@@ -212,10 +212,11 @@ class IncomingTasksTab(TabPane):
             while True:
                 try:
                     new_tasks = await BEAM_CLIENT.get_beam_tasks()
-                    self.all_tasks = {**self.all_tasks, **{task.id: task for task in new_tasks}}
-                    self.update_tasks(new_tasks)
                 except Exception as e:
                     debug(f"Error fetching tasks: {e}")
+                else:
+                    self.all_tasks = {**self.all_tasks, **{task.id: task for task in new_tasks}}
+                    self.update_tasks(new_tasks)
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
