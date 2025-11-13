@@ -10,7 +10,9 @@ import json
 import os
 from pathlib import Path
 from typing import Any, List
+from uuid import UUID
 
+from beam import BeamClient, BeamResult, BeamTask, BeamWorkStatus
 from dotenv import load_dotenv
 from pydantic.types import UUID4
 from textual import on
@@ -19,8 +21,6 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets.data_table import RowKey
-from beam import BeamClient, BeamResult, BeamTask, BeamWorkStatus
 from textual.widgets import (
     Button,
     DataTable,
@@ -30,13 +30,14 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    Pretty,
     Select,
+    Static,
     TabbedContent,
     TabPane,
     TextArea,
-    Static,
-    Pretty,
 )
+from textual.widgets.data_table import RowKey
 
 load_dotenv()
 
@@ -388,41 +389,33 @@ class TasksResultsApp(App):
         yield Footer()
 
     async def watch_socket_requests(self):
-        while False:
+        while True:
             try:
-                debug("Watching socket requests")
                 socket_request = await BEAM_CLIENT.get_socket_request()
                 if socket_request is None:
                     continue
+                debug(f"Received socket request: {socket_request}")
+                task_id = UUID(socket_request.metadata.id.strip('"'))
             except Exception as e:
-                raise e
-                debug(f"Error while watching socket requests: {str(e)}")
-                self.notify(f"Error while watching socket requests: {str(e)}")
+                debug(f"Error while watching socket requests: {repr(e)}")
                 await asyncio.sleep(1)
                 continue
-            if socket_request.metadata.task in self.tasks:
-                debug(f"Received socket request: {socket_request}")
+            if task_id in self.tasks:
                 try:
+                    debug(f"Downloading file for task {task_id}")
                     file = await BEAM_CLIENT.download_file_for(socket_request)
+                    filepath = Path(f"./files/{task_id}/{socket_request.from_}")
+                    filepath.mkdir(exist_ok=True, parents=True)
+                    filename = socket_request.metadata.suggested_name
+                    if ".." in filename or filename == "" or filename == "/":
+                        debug(f"Invalid filename: {filename}")
+                        continue
+                    with filepath.joinpath(filename).open("wb+") as f:
+                        f.write(file)
                 except Exception as e:
                     debug(f"Error while downloading file: {repr(e)}")
-                    self.notify(f"Error while downloading file: {repr(e)}")
-                    import traceback
-                    # traceback.print_exception(e, file=__log_file)
-                    traceback.print_exc(file=__log_file)
-                    # raise e
-                filepath = Path(
-                    f"./files/{socket_request.metadata.task}/{socket_request.from_}"
-                )
-                filepath.mkdir(exist_ok=True)
-                filename = socket_request.metadata.filename
-                if ".." in filename or filename == "" or filename == "/":
-                    continue
-                filepath.joinpath(filename).write_bytes(file)
             else:
-                self.notify(
-                    f"Unknown socket task {socket_request.metadata.task} from {socket_request.from_}"
-                )
+                debug(f"Unknown socket task {task_id} from {socket_request.from_}")
                 try:
                     # Connect to remove the task socket
                     await BEAM_CLIENT.download_file_for(socket_request)
@@ -434,6 +427,7 @@ class TasksResultsApp(App):
 
     def __init__(self):
         super().__init__()
+
 
 if __name__ == "__main__":
     app = TasksResultsApp()

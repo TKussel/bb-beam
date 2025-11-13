@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Any, AsyncGenerator, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 from uuid import UUID, uuid4
 
 import httpx
@@ -43,8 +43,8 @@ class BeamResult(BaseModel):
 
 
 class FileMetadata(BaseModel):
-    filename: str
-    task: UUID
+    suggested_name: str
+    id: str = Field(alias="meta")
 
 
 class BeamSocketRequest(BaseModel):
@@ -112,7 +112,6 @@ class BeamClient:
 
     async def upload_file_for(self, task: BeamTask, file_path: Path):
         from main import debug
-
         to = ".".join(task.from_.split(".")[:2])
         proc = await asyncio.subprocess.create_subprocess_exec(
             "docker",
@@ -129,6 +128,8 @@ class BeamClient:
             "--beam-id",
             self.app_id,
             "send",
+            "--meta",
+            f'"{task.id}"',
             "--to",
             to,
             f"{file_path.resolve()}",
@@ -141,7 +142,9 @@ class BeamClient:
 
     async def get_socket_request(self) -> BeamSocketRequest | None:
         response = await self.client.get(
-            f"{self.base_url}/v1/sockets", params={"wait_count": "1", "wait_time": "2s"}
+            f"{self.base_url}/v1/sockets",
+            params={"wait_count": "1", "wait_time": "10s"},
+            timeout=12,
         )
         response.raise_for_status()
         json = response.json()
@@ -150,18 +153,27 @@ class BeamClient:
         return BeamSocketRequest.model_validate(json[0])
 
     async def download_file_for(self, socket_request: BeamSocketRequest) -> bytes:
-        response = await self.client.get(
-            f"{self.base_url}/v1/sockets/{socket_request.id}",
-            headers={"upgrade": "tcp"},
-            timeout=None,
+        from main import debug
+        proc = await asyncio.subprocess.create_subprocess_exec(
+            "docker",
+            "run",
+            "--rm",
+            "--net=host",
+            "samply/beam-file",
+            "--beam-url",
+            self.base_url,
+            "--beam-secret",
+            self.api_key,
+            "--beam-id",
+            self.app_id,
+            "receive",
+            "-n",
+            "1",
+            "print",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        if response.status_code != 101:
-            response.raise_for_status()
-
-        stream = response.extensions["network_stream"]
-        content = await stream.read(max_bytes=64)
-        try:
-            await stream.aclose()
-        except Exception:
-            pass
-        return content
+        if (await proc.wait()) != 0:
+            stderr = await proc.stderr.read()
+            debug("Error", stderr.decode())
+        return await proc.stdout.read()
